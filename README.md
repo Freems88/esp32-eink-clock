@@ -1,6 +1,6 @@
 # ESP32 E-Ink Clock
 
-A desk clock built on an ESP32 driving five e-paper displays. Shows time, date,
+A wall clock built on an ESP32 driving five e-paper displays. Shows time, date,
 day of week, and live weather data fetched from Open-Meteo.
 
 ![Clock photo](clock.jpg)
