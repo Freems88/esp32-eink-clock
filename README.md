@@ -5,6 +5,8 @@ day of week, and live weather data fetched from Open-Meteo.
 
 ![Clock photo](clock.jpg)
 
+3D printed case available on Printables: [E-Paper Clock](https://www.printables.com/model/1758792-e-paper-clock)
+
 ## Displays
 
 | Panel | Model | Content | CS | BUSY |
