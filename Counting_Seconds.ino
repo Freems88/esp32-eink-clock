@@ -470,11 +470,11 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
     }
     else
     {
-      // ── col1: condition description (stays at TOP+22) ─────────────────────
+      // ── col1: condition description ───────────────────────────────────────
       u8g2Fonts.setFont(u8g2_font_fub20_tf);
       {
         const char* desc = weatherDescription(weatherCode);
-        u8g2Fonts.setCursor(COL1_CTR - u8g2Fonts.getUTF8Width(desc) / 2, TOP + 22);
+        u8g2Fonts.setCursor(COL1_CTR - u8g2Fonts.getUTF8Width(desc) / 2, TOP + 30);
         u8g2Fonts.print(desc);
       }
 
@@ -519,10 +519,10 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
       u8g2Fonts.print(hlBuf);
 
       // ── col3: wind direction + speed ─────────────────────────────────────
-      // direction at TOP+50, speed baseline at TOP+138 (aligns with C_FEEL)
+      // direction at TOP+43, speed baseline at TOP+138 (aligns with C_FEEL)
       const char* cardDir = windCardinal(windDirection);
       u8g2Fonts.setFont(u8g2_font_fub20_tf);
-      u8g2Fonts.setCursor(COL3_CTR - u8g2Fonts.getUTF8Width(cardDir) / 2, TOP + 50);
+      u8g2Fonts.setCursor(COL3_CTR - u8g2Fonts.getUTF8Width(cardDir) / 2, TOP + 43);
       u8g2Fonts.print(cardDir);
 
       char speedBuf[8];
@@ -591,6 +591,13 @@ void loop()
 
   if (currentMinute != lastMinute)
   {
+    // Wake all displays from hibernate — RST pulse via display1 resets all
+    display1.init(115200, true,  2, false);
+    display2.init(115200, false, 2, false);
+    display3.init(115200, false, 2, false);
+    display4.init(115200, false, 2, false);
+    display5.init(115200, false, 2, false);
+
     bool hhFull   = (currentHour != lastHour);
     bool mmFull   = (timeinfo.tm_min % 10 == 0);
     bool dddeFull = (currentHour != lastHour);
@@ -604,6 +611,14 @@ void loop()
     if (timeinfo.tm_mon  != lastMonth) showMMM(timeinfo, true);
 
     showDDDE(timeinfo, dddeFull);
+
+    // Hibernate all display controllers — saves ~40mA continuous draw
+    // (image is retained in pixel RAM; init() wakes them next cycle)
+    display1.hibernate();
+    display2.hibernate();
+    display3.hibernate();
+    display4.hibernate();
+    display5.hibernate();
 
     lastMinute = currentMinute;
     lastHour   = currentHour;
