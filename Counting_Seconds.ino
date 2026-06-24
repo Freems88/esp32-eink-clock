@@ -79,6 +79,7 @@ RTC_DATA_ATTR int  lastMonth         = -1;
 RTC_DATA_ATTR int  lastSyncSlot      = -1;
 RTC_DATA_ATTR int  updateCount       = 0;
 RTC_DATA_ATTR bool lastWeatherValid  = false;
+RTC_DATA_ATTR bool weatherChanged    = false;  // set after each sync, cleared after full refresh
 
 RTC_DATA_ATTR int   weatherCode      = 0;
 RTC_DATA_ATTR float rainSum          = 0;
@@ -584,7 +585,10 @@ void loop()
   if (currentSlot != lastSyncSlot)
   {
     if (connectSyncAndFetch())
-      lastSyncSlot = currentSlot;
+    {
+      lastSyncSlot   = currentSlot;
+      weatherChanged = true;   // trigger full refresh on next DDDE draw
+    }
   }
 
   int currentMinute = timeinfo.tm_min;
@@ -600,21 +604,23 @@ void loop()
     display4.init(115200, false, 2, false);
     display5.init(115200, false, 2, false);
 
-    bool firstBoot = (lastMinute == -1);   // force full refresh on cold start
-    bool hhFull   = firstBoot || (currentHour != lastHour);
+    bool firstBoot  = (lastMinute == -1);  // force full refresh on cold start
+    bool hourChanged = (currentHour != lastHour);
+    bool hhFull   = firstBoot || hourChanged;
     bool mmFull   = firstBoot || (timeinfo.tm_min % 10 == 0);
-    bool dddeFull = firstBoot || (currentHour != lastHour)
-                               || (weatherValid != lastWeatherValid);
 
     showHH(timeinfo, hhFull);
     showMM(timeinfo, mmFull);
 
-    // DD and MMM only refresh when their value actually changes — skipping
-    // the update entirely avoids unnecessary e-ink cycles on slow-changing displays
+    // DD and MMM only refresh when their value actually changes
     if (timeinfo.tm_mday != lastDay)   showDD(timeinfo, true);
     if (timeinfo.tm_mon  != lastMonth) showMMM(timeinfo, true);
 
-    showDDDE(timeinfo, dddeFull);
+    // DDDE only has content that changes on the hour, after a weather sync,
+    // or when weather valid state changes — no point refreshing every minute
+    bool dddeNeeded = firstBoot || hourChanged || weatherChanged
+                                || (weatherValid != lastWeatherValid);
+    if (dddeNeeded) showDDDE(timeinfo, true);  // always full refresh when called
 
     // Hibernate all display controllers — saves ~40mA continuous draw
     // (image is retained in pixel RAM; init() wakes them next cycle)
@@ -629,6 +635,7 @@ void loop()
     lastDay          = timeinfo.tm_mday;
     lastMonth        = timeinfo.tm_mon;
     lastWeatherValid = weatherValid;
+    weatherChanged   = false;
     updateCount++;
   }
 
