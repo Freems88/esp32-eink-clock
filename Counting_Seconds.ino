@@ -72,12 +72,13 @@ const int MONTH_BITMAP_HEIGHT = 300;
 
 // ── RTC memory (survives light sleep) ─────────────────────────────────────
 
-RTC_DATA_ATTR int  lastMinute   = -1;
-RTC_DATA_ATTR int  lastHour     = -1;
-RTC_DATA_ATTR int  lastDay      = -1;
-RTC_DATA_ATTR int  lastMonth    = -1;
-RTC_DATA_ATTR int  lastSyncSlot = -1;
-RTC_DATA_ATTR int  updateCount  = 0;
+RTC_DATA_ATTR int  lastMinute        = -1;
+RTC_DATA_ATTR int  lastHour          = -1;
+RTC_DATA_ATTR int  lastDay           = -1;
+RTC_DATA_ATTR int  lastMonth         = -1;
+RTC_DATA_ATTR int  lastSyncSlot      = -1;
+RTC_DATA_ATTR int  updateCount       = 0;
+RTC_DATA_ATTR bool lastWeatherValid  = false;
 
 RTC_DATA_ATTR int   weatherCode      = 0;
 RTC_DATA_ATTR float rainSum          = 0;
@@ -602,7 +603,8 @@ void loop()
     bool firstBoot = (lastMinute == -1);   // force full refresh on cold start
     bool hhFull   = firstBoot || (currentHour != lastHour);
     bool mmFull   = firstBoot || (timeinfo.tm_min % 10 == 0);
-    bool dddeFull = firstBoot || (currentHour != lastHour);
+    bool dddeFull = firstBoot || (currentHour != lastHour)
+                               || (weatherValid != lastWeatherValid);
 
     showHH(timeinfo, hhFull);
     showMM(timeinfo, mmFull);
@@ -622,10 +624,11 @@ void loop()
     display4.hibernate();
     display5.hibernate();
 
-    lastMinute = currentMinute;
-    lastHour   = currentHour;
-    lastDay    = timeinfo.tm_mday;
-    lastMonth  = timeinfo.tm_mon;
+    lastMinute       = currentMinute;
+    lastHour         = currentHour;
+    lastDay          = timeinfo.tm_mday;
+    lastMonth        = timeinfo.tm_mon;
+    lastWeatherValid = weatherValid;
     updateCount++;
   }
 
