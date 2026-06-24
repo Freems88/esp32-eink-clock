@@ -591,16 +591,18 @@ void loop()
 
   if (currentMinute != lastMinute)
   {
-    // Wake all displays from hibernate — RST pulse via display1 resets all
-    display1.init(115200, true,  2, false);
+    // Wake all displays from hibernate via SPI only — no RST pulse so the
+    // controller retains its frame state and partial refresh keeps working
+    display1.init(115200, false, 2, false);
     display2.init(115200, false, 2, false);
     display3.init(115200, false, 2, false);
     display4.init(115200, false, 2, false);
     display5.init(115200, false, 2, false);
 
-    bool hhFull   = (currentHour != lastHour);
-    bool mmFull   = (timeinfo.tm_min % 10 == 0);
-    bool dddeFull = (currentHour != lastHour);
+    bool firstBoot = (lastMinute == -1);   // force full refresh on cold start
+    bool hhFull   = firstBoot || (currentHour != lastHour);
+    bool mmFull   = firstBoot || (timeinfo.tm_min % 10 == 0);
+    bool dddeFull = firstBoot || (currentHour != lastHour);
 
     showHH(timeinfo, hhFull);
     showMM(timeinfo, mmFull);
