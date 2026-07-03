@@ -26,7 +26,7 @@ All displays share SPI: **MOSI=23, SCK=18, DC=22, RST=21**
 - Partial refresh every minute, full refresh hourly
 - Day/month displays only refresh when the value actually changes
 - Light sleep between updates for low power draw
-- Toronto coordinates by default — change `LAT`/`LON` in the sketch
+- Location and timezone configured in `secrets.h`
 
 ## Dependencies
 
@@ -40,10 +40,9 @@ Board: **ESP32 Dev Module** (Arduino IDE → Board Manager → esp32 by Espressi
 
 ## Setup
 
-1. Copy `secrets.h.example` to `secrets.h` and fill in your WiFi credentials
-2. Adjust `LAT` / `LON` in `Counting_Seconds.ino` for your location
-3. Set timezone string in `connectSyncAndFetch()` (currently `EST5EDT,M3.2.0,M11.1.0`)
-4. Compile and upload
+1. Copy `secrets.h.example` to `secrets.h` and fill in your WiFi credentials,
+   location coordinates, and [POSIX timezone string](https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv)
+2. Compile and upload
 
 ## Bitmaps
 

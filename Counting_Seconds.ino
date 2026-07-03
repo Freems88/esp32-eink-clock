@@ -7,6 +7,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <driver/gpio.h>
 
 // ── Display definitions ────────────────────────────────────────────────────
 // Shared SPI: DC=22, RST=21
@@ -52,10 +53,10 @@ const char* windCardinal(int degrees)
   return directions[(int)((degrees + 11.25) / 22.5) % 16];
 }
 
-// ── Toronto coordinates ────────────────────────────────────────────────────
+// ── Location (defined in secrets.h) ────────────────────────────────────────
 
-const float LAT = 43.6532;
-const float LON = -79.3832;
+const float LAT = WEATHER_LAT;
+const float LON = WEATHER_LON;
 
 // ── Bitmap dimensions ──────────────────────────────────────────────────────
 // Digit bitmaps (display1, display2): two per panel side by side
@@ -141,7 +142,7 @@ bool fetchWeather()
                "wind_speed_10m,wind_direction_10m,weather_code,surface_pressure" +
     "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,"
             "rain_sum,showers_sum,snowfall_sum,sunrise,sunset" +
-    "&timezone=America%2FToronto&forecast_days=1";
+    "&timezone=auto&forecast_days=1";  // auto resolves tz from the coordinates
 
   http.begin(url);
   http.setTimeout(8000);
@@ -227,8 +228,7 @@ bool connectSyncAndFetch()
   }
 
   configTime(0, 0, "time.google.com", "time.cloudflare.com", "pool.ntp.org");
-  setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
-  tzset();
+  // TZ is set in setup() — must happen every boot since env vars don't survive deep sleep
 
   struct tm timeinfo;
   int ntpAttempts = 0;
@@ -543,40 +543,62 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
 
 
 
-// ── Setup ──────────────────────────────────────────────────────────────────
+// ── Deep sleep ─────────────────────────────────────────────────────────────
+// Deep sleep reboots into setup() on every wake, so all clock logic lives
+// there and loop() is never reached. State persists via RTC_DATA_ATTR.
+
+void goToSleep(uint64_t microseconds)
+{
+  // Hold shared RST (GPIO21) high through deep sleep — a floating reset line
+  // could glitch the hibernated displays and corrupt their retained frame state
+  gpio_hold_en(GPIO_NUM_21);
+  gpio_deep_sleep_hold_en();
+
+  esp_sleep_enable_timer_wakeup(microseconds);
+  esp_deep_sleep_start();
+}
+
+// ── Setup — runs on every wake ─────────────────────────────────────────────
 
 void setup()
 {
   Serial.begin(115200);
 
-  // Shared RST: only the first init pulses RST (resets all displays at once).
-  // Subsequent inits send each display's init commands via its own CS pin only.
-  display1.init(115200, true,  2, false);
+  // Env vars don't survive deep sleep — TZ must be set on every boot
+  // or getLocalTime() renders UTC between NTP syncs
+  setenv("TZ", CLOCK_TZ, 1);
+  tzset();
+
+  // Release the RST hold from the previous sleep so GxEPD2 can drive the pin
+  gpio_deep_sleep_hold_dis();
+  gpio_hold_dis(GPIO_NUM_21);
+
+  // Timer wake = normal minute tick; anything else = cold boot / reset
+  bool coldBoot = (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER);
+
+  // Shared RST: pulse only on cold boot (resets all panels at once).
+  // On timer wakes init via SPI only, preserving controller frame state
+  // so partial refresh keeps working
+  display1.init(115200, coldBoot, 2, false);
   display2.init(115200, false, 2, false);
   display3.init(115200, false, 2, false);
   display4.init(115200, false, 2, false);
   display5.init(115200, false, 2, false);
 
-  connectSyncAndFetch();
-}
+  if (coldBoot) connectSyncAndFetch();
 
-// ── Loop ───────────────────────────────────────────────────────────────────
-
-void loop()
-{
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo))
   {
     Serial.println("Failed to get local time");
     timeValid = false;
     showError("time lost - resyncing");
-    bool resynced = connectSyncAndFetch();
+    bool resynced = coldBoot ? false : connectSyncAndFetch();
     if (!resynced || !getLocalTime(&timeinfo))
     {
       showError("sync failed - sleep 5m");
-      esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
-      esp_light_sleep_start();
-      return;
+      hibernateDisplays();
+      goToSleep(5ULL * 60 * 1000000);
     }
   }
 
@@ -596,15 +618,7 @@ void loop()
 
   if (currentMinute != lastMinute)
   {
-    // Wake all displays from hibernate via SPI only — no RST pulse so the
-    // controller retains its frame state and partial refresh keeps working
-    display1.init(115200, false, 2, false);
-    display2.init(115200, false, 2, false);
-    display3.init(115200, false, 2, false);
-    display4.init(115200, false, 2, false);
-    display5.init(115200, false, 2, false);
-
-    bool firstBoot  = (lastMinute == -1);  // force full refresh on cold start
+    bool firstBoot   = (lastMinute == -1);  // force full refresh on cold start
     bool hourChanged = (currentHour != lastHour);
     bool hhFull   = firstBoot || hourChanged;
     bool mmFull   = firstBoot || (timeinfo.tm_min % 10 == 0);
@@ -622,14 +636,6 @@ void loop()
                                 || (weatherValid != lastWeatherValid);
     if (dddeNeeded) showDDDE(timeinfo, true);  // always full refresh when called
 
-    // Hibernate all display controllers — saves ~40mA continuous draw
-    // (image is retained in pixel RAM; init() wakes them next cycle)
-    display1.hibernate();
-    display2.hibernate();
-    display3.hibernate();
-    display4.hibernate();
-    display5.hibernate();
-
     lastMinute       = currentMinute;
     lastHour         = currentHour;
     lastDay          = timeinfo.tm_mday;
@@ -639,7 +645,26 @@ void loop()
     updateCount++;
   }
 
+  // Hibernate unconditionally — displays were woken by init() above
+  // regardless of whether anything was drawn this cycle
+  hibernateDisplays();
+
+  getLocalTime(&timeinfo);  // re-read: display refreshes take several seconds
   int secondsUntilNextMinute = 60 - timeinfo.tm_sec;
-  esp_sleep_enable_timer_wakeup(secondsUntilNextMinute * 1000000ULL);
-  esp_light_sleep_start();
+  // +250ms pad so we land just past the minute boundary, not just before it
+  goToSleep(secondsUntilNextMinute * 1000000ULL + 250000);
 }
+
+void hibernateDisplays()
+{
+  // Saves ~40mA continuous draw; image is retained in pixel RAM
+  display1.hibernate();
+  display2.hibernate();
+  display3.hibernate();
+  display4.hibernate();
+  display5.hibernate();
+}
+
+// ── Loop — never reached: deep sleep reboots into setup() ─────────────────
+
+void loop() {}
