@@ -227,8 +227,8 @@ bool connectSyncAndFetch()
     return false;
   }
 
-  configTime(0, 0, "time.google.com", "time.cloudflare.com", "pool.ntp.org");
-  // TZ is set in setup() — must happen every boot since env vars don't survive deep sleep
+  // configTzTime (not configTime) — plain configTime(0,0,...) overwrites TZ with UTC
+  configTzTime(CLOCK_TZ, "time.google.com", "time.cloudflare.com", "pool.ntp.org");
 
   struct tm timeinfo;
   int ntpAttempts = 0;
