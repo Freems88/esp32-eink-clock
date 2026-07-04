@@ -81,6 +81,11 @@ RTC_DATA_ATTR int  lastSyncSlot      = -1;
 RTC_DATA_ATTR int  updateCount       = 0;
 RTC_DATA_ATTR bool lastWeatherValid  = false;
 RTC_DATA_ATTR bool weatherChanged    = false;  // set after each sync, cleared after full refresh
+RTC_DATA_ATTR int    weatherRetriesLeft = 0;   // bounded next-minute retries after a failed fetch
+RTC_DATA_ATTR time_t lastWeatherSync    = 0;   // when the last successful fetch happened
+
+// Keep showing stale weather for up to 2h before declaring it unavailable
+const time_t WEATHER_STALE_SECS = 2 * 3600;
 
 RTC_DATA_ATTR int   weatherCode      = 0;
 RTC_DATA_ATTR float rainSum          = 0;
@@ -145,7 +150,7 @@ bool fetchWeather()
     "&timezone=auto&forecast_days=1";  // auto resolves tz from the coordinates
 
   http.begin(url);
-  http.setTimeout(8000);
+  http.setTimeout(15000);  // TLS handshake can be slow; 8s was causing HTTP -1
   int httpCode = http.GET();
   if (httpCode != 200)
   {
@@ -252,15 +257,26 @@ bool connectSyncAndFetch()
       timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   }
 
-  weatherValid = false;
-  for (int attempt = 1; attempt <= 3 && !weatherValid; attempt++)
+  bool fetched = false;
+  for (int attempt = 1; attempt <= 3 && !fetched; attempt++)
   {
-    weatherValid = fetchWeather();
-    if (!weatherValid)
+    fetched = fetchWeather();
+    if (!fetched)
     {
       Serial.printf("Weather fetch failed (attempt %d/3)\n", attempt);
       if (attempt < 3) delay(2000 * attempt);  // 2s then 4s backoff
     }
+  }
+  if (fetched)
+  {
+    weatherValid    = true;
+    lastWeatherSync = time(nullptr);
+  }
+  else if (weatherValid && time(nullptr) - lastWeatherSync > WEATHER_STALE_SECS)
+  {
+    // On failure, keep showing the last good data; only surface
+    // "Weather unavailable" once it has gone truly stale
+    weatherValid = false;
   }
 
   WiFi.disconnect(true);
@@ -549,6 +565,9 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
 
 void goToSleep(uint64_t microseconds)
 {
+  Serial.printf("Sleeping %.1f s\n", microseconds / 1000000.0);
+  Serial.flush();  // deep sleep cuts UART mid-buffer otherwise
+
   // Hold shared RST (GPIO21) high through deep sleep — a floating reset line
   // could glitch the hibernated displays and corrupt their retained frame state
   gpio_hold_en(GPIO_NUM_21);
@@ -575,6 +594,8 @@ void setup()
 
   // Timer wake = normal minute tick; anything else = cold boot / reset
   bool coldBoot = (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER);
+  Serial.printf("Wake: %s (reset reason %d)\n",
+                coldBoot ? "COLD BOOT" : "timer", esp_reset_reason());
 
   // Shared RST: pulse only on cold boot (resets all panels at once).
   // On timer wakes init via SPI only, preserving controller frame state
@@ -585,7 +606,8 @@ void setup()
   display4.init(115200, false, 2, false);
   display5.init(115200, false, 2, false);
 
-  if (coldBoot) connectSyncAndFetch();
+  bool syncedOnBoot = false;
+  if (coldBoot) syncedOnBoot = connectSyncAndFetch();
 
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo))
@@ -602,48 +624,77 @@ void setup()
     }
   }
 
-  // Sync every 30 minutes
-  int currentSlot = timeinfo.tm_hour * 100 + (timeinfo.tm_min / 30) * 30;
-  if (currentSlot != lastSyncSlot)
-  {
-    if (connectSyncAndFetch())
-    {
-      lastSyncSlot   = currentSlot;
-      weatherChanged = true;   // trigger full refresh on next DDDE draw
-    }
-  }
-
   int currentMinute = timeinfo.tm_min;
   int currentHour   = timeinfo.tm_hour;
 
-  if (currentMinute != lastMinute)
-  {
-    bool firstBoot   = (lastMinute == -1);  // force full refresh on cold start
-    bool hourChanged = (currentHour != lastHour);
-    bool hhFull   = firstBoot || hourChanged;
-    bool mmFull   = firstBoot || (timeinfo.tm_min % 10 == 0);
+  bool firstBoot     = (lastMinute == -1);   // force full refresh on cold start
+  bool minuteChanged = (currentMinute != lastMinute);
+  bool hourChanged   = (currentHour != lastHour);
 
-    showHH(timeinfo, hhFull);
-    showMM(timeinfo, mmFull);
+  // ── time displays first — never delayed by radio work ────────────────────
+  if (minuteChanged)
+  {
+    Serial.printf("Drawing %02d:%02d\n", currentHour, currentMinute);
+    showHH(timeinfo, firstBoot || hourChanged);
+    showMM(timeinfo, firstBoot || (timeinfo.tm_min % 10 == 0));
 
     // DD and MMM only refresh when their value actually changes
     if (timeinfo.tm_mday != lastDay)   showDD(timeinfo, true);
     if (timeinfo.tm_mon  != lastMonth) showMMM(timeinfo, true);
 
-    // DDDE only has content that changes on the hour, after a weather sync,
-    // or when weather valid state changes — no point refreshing every minute
-    bool dddeNeeded = firstBoot || hourChanged || weatherChanged
-                                || (weatherValid != lastWeatherValid);
-    if (dddeNeeded) showDDDE(timeinfo, true);  // always full refresh when called
-
-    lastMinute       = currentMinute;
-    lastHour         = currentHour;
-    lastDay          = timeinfo.tm_mday;
-    lastMonth        = timeinfo.tm_mon;
-    lastWeatherValid = weatherValid;
-    weatherChanged   = false;
+    lastMinute = currentMinute;
+    lastHour   = currentHour;
+    lastDay    = timeinfo.tm_mday;
+    lastMonth  = timeinfo.tm_mon;
     updateCount++;
   }
+
+  // ── radio: weather sync every 30 minutes ─────────────────────────────────
+  int currentSlot = timeinfo.tm_hour * 100 + (timeinfo.tm_min / 30) * 30;
+  if (syncedOnBoot)
+  {
+    // Cold boot already synced before time was known — just mark the slot
+    lastSyncSlot       = currentSlot;
+    weatherChanged     = weatherValid;
+    weatherRetriesLeft = weatherValid ? 0 : 2;
+  }
+  else if (currentSlot != lastSyncSlot)
+  {
+    time_t before = lastWeatherSync;
+    if (connectSyncAndFetch())
+    {
+      lastSyncSlot = currentSlot;
+      bool fetchOk = (lastWeatherSync != before);
+      weatherChanged     = fetchOk;      // full DDDE refresh only when data changed
+      weatherRetriesLeft = fetchOk ? 0 : 2;  // arm bounded next-minute retries
+    }
+  }
+  else if (weatherRetriesLeft > 0)
+  {
+    // Weather failed at the last slot despite WiFi being up — retry on this
+    // minute wake, at most twice, then give up until the next slot
+    weatherRetriesLeft--;
+    time_t before = lastWeatherSync;
+    if (connectSyncAndFetch() && lastWeatherSync != before)
+    {
+      weatherChanged     = true;
+      weatherRetriesLeft = 0;
+    }
+  }
+
+  // ── DDDE last — consumes whatever the sync produced ──────────────────────
+  // Only has content that changes on the hour, after a weather sync, or when
+  // weather valid state changes — no point refreshing every minute
+  bool dddeNeeded = firstBoot || hourChanged || weatherChanged
+                              || (weatherValid != lastWeatherValid);
+  if (dddeNeeded)
+  {
+    Serial.println("Drawing DDDE");
+    showDDDE(timeinfo, true);  // always full refresh when called
+  }
+
+  lastWeatherValid = weatherValid;
+  weatherChanged   = false;
 
   // Hibernate unconditionally — displays were woken by init() above
   // regardless of whether anything was drawn this cycle
