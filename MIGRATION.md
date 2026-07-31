@@ -105,6 +105,14 @@ delay(3000);   // let USB CDC enumerate — REMOVE for battery operation
 - **Don't bother with switched display power.** Cutting panel VCC wipes the
   controller's frame RAM, forcing a full refresh every wake — more current and
   more visible flashing than the ~20–50µA it would save.
+- **Battery voltage monitoring.** GPIO1 is the battery detect pin (the divider
+  ratio isn't published — calibrate against a multimeter; 2:1 is the likely
+  convention). Use `analogReadMilliVolts(1)`, not `analogRead()`, so the chip's
+  factory ADC calibration is applied. Plan: sample once per 30-minute sync, keep
+  it in `RTC_DATA_ATTR`, log every cycle, and show an indicator on DDDE only
+  below ~3.5V. Avoid showing a percentage — the LiPo curve is nearly flat from
+  4.0V to 3.6V, so a percentage would be fiction while a low-voltage warning is
+  reliable.
 
 ## What carried over unchanged
 Deep-sleep architecture, hibernate logic, weather retry/stale handling, refresh

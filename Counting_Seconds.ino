@@ -444,6 +444,19 @@ void showMMM(struct tm timeinfo, bool fullRefresh)
   while (display4.nextPage());
 }
 
+// Battery voltage on GPIO1. analogReadMilliVolts applies the chip's factory ADC
+// calibration — much more accurate than converting raw counts by hand.
+// Divider measured at 2.015 (multimeter 3.96V vs 1.965V at the ADC); nominally
+// a 2:1 divider, the 0.8% is resistor tolerance.
+const float BATT_DIVIDER = 2.015;
+
+float battVolts()
+{
+  uint32_t sum = 0;
+  for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(1);  // ADC is noisy — average
+  return (sum / 8) * BATT_DIVIDER / 1000.0;
+}
+
 // Display 5: DDDE
 // Upper half: day-of-week bitmap
 // Lower half: col1=weather icon+description, col2=temp/feels/HL, col3=wind text
@@ -474,6 +487,14 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
   const int C_HL   = TOP + 200;   // fub25, dropped lower to use available space
 
   int16_t dowX = (W - DOW_BITMAP_WIDTH) / 2;
+
+  // Sample once, outside the page loop, so the value is identical across pages
+  char battBuf[16];
+  {
+    float v = battVolts();
+    sprintf(battBuf, "%.2fV", v);
+    Serial.printf("Battery: %s\n", battBuf);
+  }
 
   display5.firstPage();
   do
@@ -568,6 +589,11 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
       u8g2Fonts.setCursor(COL3_CTR - u8g2Fonts.getUTF8Width("km/h") / 2, TOP + 183);
       u8g2Fonts.print("km/h");
     }
+
+    // Battery readout, lower right corner
+    u8g2Fonts.setFont(u8g2_font_fub11_tf);
+    u8g2Fonts.setCursor(W - 8 - u8g2Fonts.getUTF8Width(battBuf), display5.height() - 8);
+    u8g2Fonts.print(battBuf);
   }
   while (display5.nextPage());
 }
