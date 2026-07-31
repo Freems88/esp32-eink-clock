@@ -7,22 +7,37 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <SPI.h>
 #include <driver/gpio.h>
 
 // ── Display definitions ────────────────────────────────────────────────────
-// Shared SPI: DC=22, RST=21
+// Board: FireBeetle 2 ESP32-C5 (DFR1222) — see MIGRATION.md
+// Shared SPI: SCK=23, MOSI=24 (hardware SPI), DC=10, RST=9
 //
-// display1 = 4"   HH (hours)      CS=5,   BUSY=4
-// display2 = 4"   MM (minutes)    CS=19,  BUSY=26
-// display3 = 4"   DD (day)        CS=14,  BUSY=12
-// display4 = 4"   MMM (month)     CS=32,  BUSY=33
-// display5 = 7"   DDDE / weather  CS=25,  BUSY=27
+// Every panel gets a real BUSY line. GPIO11/12 are free because the C5 uses
+// native USB CDC for Serial (UART0 unused); GPIO25/MISO is free because e-ink
+// is write-only. GPIO7 and 25 are strapping pins but NOT boot-mode ones (only
+// 26/27/28 set boot mode) — and BUSY is an input, so we never drive them.
+// They're assigned to DD and MMM, the two panels that refresh least often.
+//
+//                                  CS   BUSY   BUSY silkscreen
+// display1 = 4"   MM (minutes)      8     6     6/D12/LP_SDA
+// display2 = 4"   HH (hours)        5    11     11/TX
+// display3 = 4"   DD (day)          4    25     25/MI   (strapping, SDIO)
+// display4 = 4"   MMM (month)       3     7     7/D11/LP_SCL (strapping)
+// display5 = 7"   DDDE / weather    2    12     12/RX
+//
+// Left alone: 15 (onboard LED), 1 (battery ADC), 26/27/28 (boot-mode strapping)
 
-GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display1(GxEPD2_420_GDEY042T81(/*CS=*/ 5,  /*DC=*/ 22, /*RST=*/ 21, /*BUSY=*/ 4));
-GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display2(GxEPD2_420_GDEY042T81(/*CS=*/ 19, /*DC=*/ 22, /*RST=*/ 21, /*BUSY=*/ 26));
-GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display3(GxEPD2_420_GDEY042T81(/*CS=*/ 14, /*DC=*/ 22, /*RST=*/ 21, /*BUSY=*/ 12));
-GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display4(GxEPD2_420_GDEY042T81(/*CS=*/ 32, /*DC=*/ 22, /*RST=*/ 21, /*BUSY=*/ 33));
-GxEPD2_BW<GxEPD2_750_GDEY075T7, GxEPD2_750_GDEY075T7::HEIGHT / 2>  display5(GxEPD2_750_GDEY075T7( /*CS=*/ 25, /*DC=*/ 22, /*RST=*/ 21, /*BUSY=*/ 27));
+const int PIN_SCK  = 23;
+const int PIN_MOSI = 24;
+// GPIO25 is the board's MISO but e-ink never reads back, so it serves as display3 BUSY
+
+GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display1(GxEPD2_420_GDEY042T81(/*CS=*/ 8, /*DC=*/ 10, /*RST=*/ 9, /*BUSY=*/ 6));
+GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display2(GxEPD2_420_GDEY042T81(/*CS=*/ 5, /*DC=*/ 10, /*RST=*/ 9, /*BUSY=*/ 11));
+GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display3(GxEPD2_420_GDEY042T81(/*CS=*/ 4, /*DC=*/ 10, /*RST=*/ 9, /*BUSY=*/ 25));
+GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT / 4> display4(GxEPD2_420_GDEY042T81(/*CS=*/ 3, /*DC=*/ 10, /*RST=*/ 9, /*BUSY=*/ 7));
+GxEPD2_BW<GxEPD2_750_GDEY075T7, GxEPD2_750_GDEY075T7::HEIGHT / 2>  display5(GxEPD2_750_GDEY075T7( /*CS=*/ 2, /*DC=*/ 10, /*RST=*/ 9, /*BUSY=*/ 12));
 
 U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
 
@@ -568,10 +583,12 @@ void goToSleep(uint64_t microseconds)
   Serial.printf("Sleeping %.1f s\n", microseconds / 1000000.0);
   Serial.flush();  // deep sleep cuts UART mid-buffer otherwise
 
-  // Hold shared RST (GPIO21) high through deep sleep — a floating reset line
+  // Hold shared RST (GPIO9) high through deep sleep — a floating reset line
   // could glitch the hibernated displays and corrupt their retained frame state
-  gpio_hold_en(GPIO_NUM_21);
-  gpio_deep_sleep_hold_en();
+  // TODO(C5 migration): verify GPIO9 is hold-capable on the C5, and find the
+  // correct replacement for gpio_deep_sleep_hold_en() (not exposed on this
+  // core). Until then the hold may not persist through sleep — see MIGRATION.md
+  gpio_hold_en(GPIO_NUM_9);
 
   esp_sleep_enable_timer_wakeup(microseconds);
   esp_deep_sleep_start();
@@ -589,8 +606,11 @@ void setup()
   tzset();
 
   // Release the RST hold from the previous sleep so GxEPD2 can drive the pin
-  gpio_deep_sleep_hold_dis();
-  gpio_hold_dis(GPIO_NUM_21);
+  gpio_hold_dis(GPIO_NUM_9);
+
+  // Bind hardware SPI to the C5's pins before any display init.
+  // MISO passed as -1: e-ink never reads back, and GPIO25 is display3's BUSY.
+  SPI.begin(PIN_SCK, -1, PIN_MOSI, -1);
 
   // Timer wake = normal minute tick; anything else = cold boot / reset
   bool coldBoot = (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER);

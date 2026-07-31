@@ -1,7 +1,8 @@
 # ESP32 E-Ink Clock
 
-A wall clock built on an ESP32 driving five e-paper displays. Shows time, date,
-day of week, and live weather data fetched from Open-Meteo.
+A battery-powered wall clock built on a FireBeetle 2 ESP32-C5 driving five
+e-paper displays. Shows time, date, day of week, and live weather data fetched
+from Open-Meteo.
 
 ![Clock photo](clock.jpg)
 
@@ -11,13 +12,17 @@ day of week, and live weather data fetched from Open-Meteo.
 
 | Panel | Model | Content | CS | BUSY |
 |---|---|---|---|---|
-| display1 | GxEPD2_420_GDEY042T81 (4.2") | MM — minutes | 5 | 4 |
-| display2 | GxEPD2_420_GDEY042T81 (4.2") | HH — hours (12hr) | 19 | 26 |
-| display3 | GxEPD2_420_GDEY042T81 (4.2") | DD — day of month | 14 | 12 |
-| display4 | GxEPD2_420_GDEY042T81 (4.2") | MMM — month | 32 | 33 |
-| display5 | GxEPD2_750_GDEY075T7 (7.5") | Day of week + weather | 25 | 27 |
+| display1 | GxEPD2_420_GDEY042T81 (4.2") | MM — minutes | 8 | 6 |
+| display2 | GxEPD2_420_GDEY042T81 (4.2") | HH — hours (12hr) | 5 | 11 |
+| display3 | GxEPD2_420_GDEY042T81 (4.2") | DD — day of month | 4 | 25 |
+| display4 | GxEPD2_420_GDEY042T81 (4.2") | MMM — month | 3 | 7 |
+| display5 | GxEPD2_750_GDEY075T7 (7.5") | Day of week + weather | 2 | 12 |
 
-All displays share SPI: **MOSI=23, SCK=18, DC=22, RST=21**
+All displays share SPI: **DIN/MOSI=24, CLK/SCK=23, DC=10, RST=9**, plus VCC on
+the always-on `3V3` rail. The 7.5" panel's PWR pin also ties to `3V3`.
+
+See [MIGRATION.md](MIGRATION.md) for full wiring, required Arduino IDE settings,
+and board-specific gotchas.
 
 ## Features
 
@@ -25,7 +30,8 @@ All displays share SPI: **MOSI=23, SCK=18, DC=22, RST=21**
 - Weather from [Open-Meteo](https://open-meteo.com/) (no API key required) — temperature, feels like, high/low, wind direction and speed, condition icon
 - Partial refresh every minute, full refresh hourly
 - Day/month displays only refresh when the value actually changes
-- Light sleep between updates for low power draw
+- Deep sleep between updates, with all display controllers hibernated
+- Weather failures keep the last good reading on screen rather than blanking
 - Location and timezone configured in `secrets.h`
 
 ## Dependencies
@@ -36,7 +42,9 @@ Install via Arduino Library Manager:
 - [U8g2_for_Adafruit_GFX](https://github.com/olikraus/U8g2_for_Adafruit_GFX)
 - [ArduinoJson](https://arduinojson.org/)
 
-Board: **ESP32 Dev Module** (Arduino IDE → Board Manager → esp32 by Espressif)
+Board: **FireBeetle 2 ESP32-C5** (DFR1222), using esp32 core 3.x by Espressif.
+Requires a partition scheme with ≥2MB app space, PSRAM disabled, and USB CDC on
+boot enabled — see [MIGRATION.md](MIGRATION.md).
 
 ## Setup
 
