@@ -455,7 +455,10 @@ const float BATT_DIVIDER = 2.015;
 // of the LiPo curve voltage collapses fast, so 3.55V leaves real margin.
 // Recovery is higher than shutdown so a charging cell can't oscillate the state.
 const float    BATT_SHUTDOWN = 3.55;
-const float    BATT_RECOVER  = 3.80;
+// 100mV of hysteresis is plenty: parked draw is tiny, so load-removal rebound is
+// only ~3mV and slow relaxation ~20-50mV. Higher would just mean hours of
+// "BATTERY EMPTY" while charging, since 3.80V resting is ~50% state of charge.
+const float    BATT_RECOVER  = 3.65;
 const uint64_t BATT_CHECK_US = 30ULL * 60 * 1000000;  // recheck every 30 min while parked
 
 float battVolts()
