@@ -96,6 +96,7 @@ RTC_DATA_ATTR int  lastSyncSlot      = -1;
 RTC_DATA_ATTR int  updateCount       = 0;
 RTC_DATA_ATTR bool lastWeatherValid  = false;
 RTC_DATA_ATTR bool weatherChanged    = false;  // set after each sync, cleared after full refresh
+RTC_DATA_ATTR bool batteryShutdown   = false;  // parked on low battery, waiting for charge
 RTC_DATA_ATTR int    weatherRetriesLeft = 0;   // bounded next-minute retries after a failed fetch
 RTC_DATA_ATTR time_t lastWeatherSync    = 0;   // when the last successful fetch happened
 
@@ -450,6 +451,13 @@ void showMMM(struct tm timeinfo, bool fullRefresh)
 // a 2:1 divider, the 0.8% is resistor tolerance.
 const float BATT_DIVIDER = 2.015;
 
+// Park the clock well above the cell's protection trip (~3.0V) — past the knee
+// of the LiPo curve voltage collapses fast, so 3.55V leaves real margin.
+// Recovery is higher than shutdown so a charging cell can't oscillate the state.
+const float    BATT_SHUTDOWN = 3.55;
+const float    BATT_RECOVER  = 3.80;
+const uint64_t BATT_CHECK_US = 30ULL * 60 * 1000000;  // recheck every 30 min while parked
+
 float battVolts()
 {
   uint32_t sum = 0;
@@ -600,6 +608,61 @@ void showDDDE(struct tm timeinfo, bool fullRefresh)
 
 
 
+// Parks the clock on low battery. Blanks the time/date panels so nobody reads a
+// stale clock, and leaves a charge notice where the weather normally sits.
+// E-ink holds all of this at zero power, so it stays legible while the board sleeps.
+void showBatteryShutdown(struct tm* timeinfo, float volts)
+{
+  display1.clearScreen();
+  display2.clearScreen();
+  display3.clearScreen();
+  display4.clearScreen();
+
+  const int W      = display5.width();
+  const int TOP    = DOW_BITMAP_HEIGHT;
+  const int ZONE_H = display5.height() - TOP;
+  int16_t dowX = (W - DOW_BITMAP_WIDTH) / 2;
+
+  char voltBuf[16];
+  sprintf(voltBuf, "%.2fV", volts);
+
+  display5.setRotation(0);
+  display5.setFullWindow();
+  display5.firstPage();
+  do
+  {
+    display5.fillScreen(GxEPD_WHITE);
+
+    // Day of week stays if the time is known — gives the notice some context
+    if (timeinfo)
+      display5.drawBitmap(dowX, 0,
+        epd_bitmap_allArray[dowBitmapIndex(timeinfo->tm_wday)],
+        DOW_BITMAP_WIDTH, DOW_BITMAP_HEIGHT, GxEPD_BLACK);
+
+    display5.fillRect(0, TOP, W, ZONE_H, GxEPD_BLACK);
+
+    u8g2Fonts.begin(display5);
+    u8g2Fonts.setFontMode(1);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+    u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+
+    const char* line1 = "BATTERY EMPTY";
+    u8g2Fonts.setFont(u8g2_font_fub30_tf);
+    u8g2Fonts.setCursor((W - u8g2Fonts.getUTF8Width(line1)) / 2, TOP + 85);
+    u8g2Fonts.print(line1);
+
+    const char* line2 = "Connect USB-C to charge";
+    u8g2Fonts.setFont(u8g2_font_fub20_tf);
+    u8g2Fonts.setCursor((W - u8g2Fonts.getUTF8Width(line2)) / 2, TOP + 135);
+    u8g2Fonts.print(line2);
+
+    u8g2Fonts.setFont(u8g2_font_fub20_tf);
+    u8g2Fonts.setCursor((W - u8g2Fonts.getUTF8Width(voltBuf)) / 2, TOP + 190);
+    u8g2Fonts.print(voltBuf);
+  }
+  while (display5.nextPage());
+}
+
 // ── Deep sleep ─────────────────────────────────────────────────────────────
 // Deep sleep reboots into setup() on every wake, so all clock logic lives
 // there and loop() is never reached. State persists via RTC_DATA_ATTR.
@@ -638,6 +701,30 @@ void setup()
   // MISO passed as -1: e-ink never reads back, and GPIO25 is display3's BUSY.
   SPI.begin(PIN_SCK, -1, PIN_MOSI, -1);
 
+  // Battery is read first, before WiFi or any refresh loads the rail and drags
+  // the reading low. Cheap enough (a few ms) to do on every single wake.
+  float volts = battVolts();
+  Serial.printf("Battery: %.2fV\n", volts);
+
+  if (batteryShutdown)
+  {
+    if (volts < BATT_RECOVER)
+    {
+      // Still flat. Straight back to sleep without even initialising the
+      // displays — the notice is already on screen and e-ink holds it.
+      Serial.println("Still parked on low battery");
+      goToSleep(BATT_CHECK_US);
+    }
+    // Charged enough to resume. Force a full redraw of everything, since the
+    // time/date panels were blanked and their cached values are meaningless.
+    Serial.println("Battery recovered — resuming");
+    batteryShutdown = false;
+    lastMinute = -1;
+    lastHour   = -1;
+    lastDay    = -1;
+    lastMonth  = -1;
+  }
+
   // Timer wake = normal minute tick; anything else = cold boot / reset
   bool coldBoot = (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER);
   Serial.printf("Wake: %s (reset reason %d)\n",
@@ -651,6 +738,19 @@ void setup()
   display3.init(115200, false, 2, false);
   display4.init(115200, false, 2, false);
   display5.init(115200, false, 2, false);
+
+  // Below the floor: park before the rail sags far enough to brown out mid-refresh.
+  // Checked ahead of the WiFi sync so a flat cell never powers up the radio.
+  if (volts < BATT_SHUTDOWN)
+  {
+    Serial.printf("Battery critical (%.2fV) — parking\n", volts);
+    batteryShutdown = true;
+    struct tm shutdownTime;
+    bool haveTime = getLocalTime(&shutdownTime, 100);  // short timeout: RTC or nothing
+    showBatteryShutdown(haveTime ? &shutdownTime : nullptr, volts);
+    hibernateDisplays();
+    goToSleep(BATT_CHECK_US);
+  }
 
   bool syncedOnBoot = false;
   if (coldBoot) syncedOnBoot = connectSyncAndFetch();
